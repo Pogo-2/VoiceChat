@@ -7,8 +7,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::domain::control::ControlMsg;
-use crate::domain::identity::PeerId;
+use crate::domain::identity::{PeerId, RoomId, SharedSenderKey};
 
+use super::key_distribute::KeyDistributeUseCase;
 use super::ports::{AppEvents, E2eeKeystore, RoomState, Transport};
 
 /// Continuously receives and dispatches control messages.
@@ -18,6 +19,10 @@ pub struct HandleControlUseCase {
     room_state: Arc<dyn RoomState>,
     app_events: Arc<dyn AppEvents>,
     our_peer_id: PeerId,
+    room_id: RoomId,
+    key_distribute: Arc<KeyDistributeUseCase>,
+    /// The current sender key used by the media send loop.
+    shared_key: SharedSenderKey,
 }
 
 impl HandleControlUseCase {
@@ -27,6 +32,9 @@ impl HandleControlUseCase {
         room_state: Arc<dyn RoomState>,
         app_events: Arc<dyn AppEvents>,
         our_peer_id: PeerId,
+        room_id: RoomId,
+        key_distribute: Arc<KeyDistributeUseCase>,
+        shared_key: SharedSenderKey,
     ) -> Self {
         Self {
             transport,
@@ -34,6 +42,9 @@ impl HandleControlUseCase {
             room_state,
             app_events,
             our_peer_id,
+            room_id,
+            key_distribute,
+            shared_key,
         }
     }
 
@@ -51,6 +62,17 @@ impl HandleControlUseCase {
                 info!(peer_id = ?peer.peer_id, name = %peer.display_name, "Peer joined");
                 self.app_events.emit_peer_joined(&peer).await;
                 self.room_state.add_peer(peer);
+
+                // Re-distribute our CURRENT sender key so the new peer can
+                // decrypt media that is already being sent.
+                let (key_id, ref secret) = *self.shared_key.read().await;
+                if let Err(e) = self
+                    .key_distribute
+                    .distribute_existing(self.room_id, key_id, secret)
+                    .await
+                {
+                    warn!("Failed to re-distribute sender key after PeerJoined: {e}");
+                }
             }
 
             ControlMsg::PeerLeft { peer_id } => {

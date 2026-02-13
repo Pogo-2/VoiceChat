@@ -45,6 +45,8 @@ pub enum ControlMsg {
         ed25519_pub: Ed25519PublicKey,
     },
     PeerList {
+        /// The server-assigned PeerId for the joining client.
+        your_peer_id: PeerId,
         peers: Vec<PeerInfo>,
     },
     PeerJoined {

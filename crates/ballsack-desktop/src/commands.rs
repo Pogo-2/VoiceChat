@@ -79,7 +79,11 @@ pub async fn end_call(
 ) -> Result<(), String> {
     info!("end_call invoked");
     let mut guard = state.session.lock().await;
-    // Drop the session (closes connection, stops tasks via Arc drop).
+    // Actively close the QUIC connection so the server is notified immediately.
+    // This unblocks all background tasks waiting on recv_control / recv_datagram.
+    if let Some(session) = guard.as_ref() {
+        session.transport.close();
+    }
     *guard = None;
     info!("Call ended");
     Ok(())

@@ -67,6 +67,11 @@ impl QuicClientTransport {
 
 #[async_trait]
 impl Transport for QuicClientTransport {
+    fn close(&self) {
+        self.connection
+            .close(quinn::VarInt::from_u32(0), b"client leaving");
+    }
+
     async fn send_control(&self, msg: ControlMsg) -> anyhow::Result<()> {
         let payload = self.codec.encode(&msg)?;
         let len = (payload.len() as u32).to_be_bytes();

@@ -34,7 +34,7 @@ struct PeerConn {
 // ---------------------------------------------------------------------------
 
 struct Room {
-    peers: HashMap<u64, Arc<PeerConn>>,
+    peers: HashMap<u64, (Arc<PeerConn>, PeerInfo)>,
 }
 
 impl Room {
@@ -170,13 +170,14 @@ impl SfuServer {
                     ed25519_pub,
                 };
 
-                // Get or create the room
+                // Get or create the room (store peer_info, get back who's already there)
                 let existing_peers = self
-                    .add_peer_to_room(room_id, Arc::clone(peer_conn))
+                    .add_peer_to_room(room_id, Arc::clone(peer_conn), peer_info.clone())
                     .await;
 
-                // Send PeerList to the new peer
+                // Send PeerList to the new peer (including their assigned PeerId)
                 self.send_control_msg(peer_conn, &ControlMsg::PeerList {
+                    your_peer_id: peer_conn.peer_id,
                     peers: existing_peers,
                 })
                 .await?;
@@ -257,9 +258,9 @@ impl SfuServer {
             let rooms = self.rooms.read().await;
             if let Some(room_lock) = rooms.get(&room_id.0) {
                 let room = room_lock.read().await;
-                for (pid, peer) in &room.peers {
+                for (pid, (peer_conn, _)) in &room.peers {
                     if *pid != sender_peer_id.0 {
-                        if let Err(e) = peer.connection.send_datagram(datagram.clone()) {
+                        if let Err(e) = peer_conn.connection.send_datagram(datagram.clone()) {
                             warn!(peer_id = pid, "Failed to forward datagram: {e}");
                         }
                     }
@@ -277,6 +278,7 @@ impl SfuServer {
         &self,
         room_id: RoomId,
         peer_conn: Arc<PeerConn>,
+        peer_info: PeerInfo,
     ) -> Vec<PeerInfo> {
         let mut rooms = self.rooms.write().await;
         let room_lock = rooms
@@ -284,13 +286,15 @@ impl SfuServer {
             .or_insert_with(|| RwLock::new(Room::new()));
         let mut room = room_lock.write().await;
 
-        // Collect existing peer infos (we don't store PeerInfo on server in this
-        // prototype; we'd need a separate store — for now return empty and rely
-        // on the JoinRoom message having been broadcast to set up state).
-        // TODO: Store PeerInfo on server for proper PeerList.
-        let existing: Vec<PeerInfo> = Vec::new();
+        // Collect existing peer infos before inserting the new peer.
+        let existing: Vec<PeerInfo> = room
+            .peers
+            .values()
+            .map(|(_, info)| info.clone())
+            .collect();
 
-        room.peers.insert(peer_conn.peer_id.0, peer_conn);
+        room.peers
+            .insert(peer_conn.peer_id.0, (peer_conn, peer_info));
         existing
     }
 
@@ -317,9 +321,9 @@ impl SfuServer {
         let rooms = self.rooms.read().await;
         if let Some(room_lock) = rooms.get(&room_id.0) {
             let room = room_lock.read().await;
-            for (pid, peer) in &room.peers {
+            for (pid, (peer_conn, _)) in &room.peers {
                 if *pid != exclude_peer.0 {
-                    if let Err(e) = self.send_control_msg(peer, msg).await {
+                    if let Err(e) = self.send_control_msg(peer_conn, msg).await {
                         warn!(peer_id = pid, "Failed to send control message: {e}");
                     }
                 }
@@ -336,8 +340,8 @@ impl SfuServer {
         let rooms = self.rooms.read().await;
         if let Some(room_lock) = rooms.get(&room_id.0) {
             let room = room_lock.read().await;
-            if let Some(peer) = room.peers.get(&target.0) {
-                if let Err(e) = self.send_control_msg(peer, msg).await {
+            if let Some((peer_conn, _)) = room.peers.get(&target.0) {
+                if let Err(e) = self.send_control_msg(peer_conn, msg).await {
                     warn!(?target, "Failed to send control message to target: {e}");
                 }
             }

@@ -30,6 +30,10 @@ pub trait Transport: Send + Sync {
 
     /// Receive the next raw media datagram.
     async fn recv_datagram(&self) -> anyhow::Result<Bytes>;
+
+    /// Actively close the connection. Background tasks that are blocked on
+    /// `recv_control` / `recv_datagram` will get an error and exit.
+    fn close(&self);
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ use ballsack_core::application::ports::{AppEvents, E2eeKeystore, RoomState, Tran
 use ballsack_core::application::receive_media::ReceiveMediaUseCase;
 use ballsack_core::application::send_media::SendMediaUseCase;
 use ballsack_core::application::stats::StatsUseCase;
-use ballsack_core::domain::identity::{PeerId, RoomId, SenderKeyId, SenderSecret};
+use ballsack_core::domain::identity::{PeerId, RoomId, SenderSecret, SharedSenderKey};
 
 // ---------------------------------------------------------------------------
 // Call session (created on start_call, dropped on end_call)
@@ -28,8 +28,7 @@ use ballsack_core::domain::identity::{PeerId, RoomId, SenderKeyId, SenderSecret}
 pub struct CallSession {
     pub room_id: RoomId,
     pub our_peer_id: PeerId,
-    pub sender_key_id: SenderKeyId,
-    pub sender_secret: SenderSecret,
+    pub shared_key: SharedSenderKey,
     pub transport: Arc<dyn Transport>,
     pub keystore: Arc<dyn E2eeKeystore>,
     pub room_state: Arc<dyn RoomState>,
@@ -76,20 +75,18 @@ pub async fn build_call_session(
     let transport: Arc<dyn Transport> =
         QuicClientTransport::connect(server_addr, "localhost").await?;
 
-    let our_peer_id = PeerId(rand::random::<u64>());
-
-    // Join room
+    // Join room — the server assigns our PeerId
     let join_room = JoinRoomUseCase::new(
         transport.clone(),
         keystore.clone(),
         room_state.clone(),
         app_events.clone(),
     );
-    join_room
+    let our_peer_id = join_room
         .execute(token, room_id, display_name)
         .await?;
 
-    // Distribute initial sender key
+    // Distribute initial sender key and store in shared holder
     let key_distribute = Arc::new(KeyDistributeUseCase::new(
         transport.clone(),
         keystore.clone(),
@@ -97,16 +94,24 @@ pub async fn build_call_session(
         our_peer_id,
     ));
     let (sender_key_id, sender_secret) = key_distribute.execute(room_id).await?;
+    let shared_key: SharedSenderKey = Arc::new(tokio::sync::RwLock::new((
+        sender_key_id,
+        SenderSecret(sender_secret.0),
+    )));
 
     // Spawn background tasks
 
-    // Control handler
+    // Control handler (shares key_distribute + shared_key so it can
+    // re-distribute the CURRENT key when a new peer joins)
     let handle_control = Arc::new(HandleControlUseCase::new(
         transport.clone(),
         keystore.clone(),
         room_state.clone(),
         app_events.clone(),
         our_peer_id,
+        room_id,
+        key_distribute.clone(),
+        shared_key.clone(),
     ));
     let hc = handle_control.clone();
     tokio::spawn(async move {
@@ -147,7 +152,7 @@ pub async fn build_call_session(
         }
     });
 
-    // Audio send loop
+    // Audio send loop (reads key from shared_key on each frame)
     let send_media = Arc::new(SendMediaUseCase::new(
         transport.clone(),
         keystore.clone(),
@@ -157,14 +162,10 @@ pub async fn build_call_session(
         rand::random(),
     ));
     let sm = send_media.clone();
-    let kid = sender_key_id;
-    let secret_clone = SenderSecret(sender_secret.0);
+    let sk = shared_key.clone();
     tokio::spawn(async move {
         let mut audio_capture = AudioCaptureSource::new();
-        if let Err(e) = sm
-            .run(&mut audio_capture, kid, secret_clone)
-            .await
-        {
+        if let Err(e) = sm.run(&mut audio_capture, sk).await {
             tracing::error!("Audio send loop exited: {e}");
         }
     });
@@ -172,8 +173,7 @@ pub async fn build_call_session(
     Ok(CallSession {
         room_id,
         our_peer_id,
-        sender_key_id,
-        sender_secret,
+        shared_key,
         transport,
         keystore,
         room_state,

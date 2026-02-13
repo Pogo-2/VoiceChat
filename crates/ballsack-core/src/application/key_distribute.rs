@@ -39,14 +39,25 @@ impl KeyDistributeUseCase {
         room_id: RoomId,
     ) -> anyhow::Result<(SenderKeyId, SenderSecret)> {
         let (key_id, secret) = self.keystore.generate_sender_key();
+        self.distribute_existing(room_id, key_id, &secret).await?;
+        Ok((key_id, secret))
+    }
 
+    /// Re-distribute an **existing** sender key to all current room peers.
+    /// Used when a new peer joins so they can decrypt media already being sent.
+    pub async fn distribute_existing(
+        &self,
+        room_id: RoomId,
+        key_id: SenderKeyId,
+        secret: &SenderSecret,
+    ) -> anyhow::Result<()> {
         let peers = self.room_state.peers();
         let mut sealed_keys = Vec::with_capacity(peers.len());
 
         for peer in &peers {
             let sealed = self
                 .keystore
-                .seal_sender_secret(&peer.x25519_pub, &secret)?;
+                .seal_sender_secret(&peer.x25519_pub, secret)?;
             sealed_keys.push(SealedKeyEntry {
                 recipient_id: peer.peer_id,
                 recipient_x25519_fingerprint: peer.x25519_pub.0[..8].to_vec(),
@@ -67,6 +78,6 @@ impl KeyDistributeUseCase {
 
         info!(?key_id, recipients = peers.len(), "Distributed sender key");
 
-        Ok((key_id, secret))
+        Ok(())
     }
 }

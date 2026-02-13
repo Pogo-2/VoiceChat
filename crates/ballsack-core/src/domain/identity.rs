@@ -58,3 +58,11 @@ pub struct PeerInfo {
     pub x25519_pub: X25519PublicKey,
     pub ed25519_pub: Ed25519PublicKey,
 }
+
+// ---------------------------------------------------------------------------
+// Shared sender key (used to keep media send loop & control handler in sync)
+// ---------------------------------------------------------------------------
+
+/// Thread-safe shared holder for the current sender key.
+/// Updated when keys rotate; read by the media send loop on every frame.
+pub type SharedSenderKey = std::sync::Arc<tokio::sync::RwLock<(SenderKeyId, SenderSecret)>>;

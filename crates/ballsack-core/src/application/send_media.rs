@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use bytes::Bytes;
 use tracing::trace;
 
-use crate::domain::identity::{PeerId, RoomId, SenderKeyId, SenderSecret};
+use crate::domain::identity::{PeerId, RoomId, SharedSenderKey};
 use crate::domain::media::{MediaHeader, MediaKind, MEDIA_MAGIC, MEDIA_VERSION};
 
 use super::ports::{E2eeKeystore, MediaCapture, Transport};
@@ -45,11 +45,13 @@ impl SendMediaUseCase {
     }
 
     /// Run the send loop: pull frames from capture, encrypt, send.
+    ///
+    /// Reads the current sender key from the shared key holder on each frame,
+    /// so key rotations are picked up automatically.
     pub async fn run(
         &self,
         capture: &mut dyn MediaCapture,
-        sender_key_id: SenderKeyId,
-        sender_secret: SenderSecret,
+        shared_key: SharedSenderKey,
     ) -> anyhow::Result<()> {
         loop {
             let frame = capture.next_frame().await?;
@@ -63,6 +65,9 @@ impl SendMediaUseCase {
             };
 
             let nonce_salt: u16 = rand::random();
+
+            // Read the current sender key (may have been rotated).
+            let (sender_key_id, ref sender_secret) = *shared_key.read().await;
 
             let header = MediaHeader {
                 magic: MEDIA_MAGIC,
@@ -79,7 +84,7 @@ impl SendMediaUseCase {
 
             let ciphertext =
                 self.keystore
-                    .encrypt_media(&sender_secret, &header, &frame.data)?;
+                    .encrypt_media(sender_secret, &header, &frame.data)?;
 
             // Build final datagram: header bytes + ciphertext_len(u16) + ciphertext
             let mut datagram = header.to_bytes();
